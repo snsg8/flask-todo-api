@@ -1,4 +1,7 @@
 import enum
+from typing import NewType
+
+import wireup.integration.flask
 from flask import Flask
 from flask.views import MethodView
 import flask_smorest as smorest
@@ -6,7 +9,7 @@ import uuid
 
 from marshmallow import Schema, fields
 
-server = Flask(__name__)
+app = Flask(__name__)
 
 class APIConfig:
     API_TITLE = "TODO API"
@@ -18,12 +21,39 @@ class APIConfig:
     OPENAPI_REDOC_PATH = '/redoc'
     OPENAPI_REDOC_UI_URL = 'https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone/'
 
-server.config.from_object(APIConfig)
+app.config.from_object(APIConfig)
 
-api = smorest.Api(server)
+api = smorest.Api(app)
 
 todo = smorest.Blueprint('todo', 'todo', url_prefix='/todo', description= 'TODO API')
 
+from wireup import service, create_sync_container, Injected, inject_from_container
+
+FactoryFunctionReturn = NewType("FactoryFunctionReturn",str)
+@service
+def factory_function() -> FactoryFunctionReturn:
+    return "This is factory function return"
+
+@service
+class MyService:
+    def __init__(self, factory: Injected[FactoryFunctionReturn]):
+        print('Initializing MyService. This constructor will be called once')
+        print('Here also received factory function return:' + str(factory))
+
+    def get_something(self):
+        return "Hello World"
+
+
+# Create DI container and register services
+container =create_sync_container(
+    services=[MyService, factory_function],
+    # This similar to @ComponentScan
+    # service_modules=[] # Give the name of the module contains classed with @service decorator
+)
+
+@inject_from_container(container)
+def free_function_with_injected(factory: Injected[FactoryFunctionReturn]) -> FactoryFunctionReturn:
+    return "From free function with injectd: "+factory
 
 tasks = [
     {
@@ -67,7 +97,10 @@ class ListTaskParameters(Schema):
 class TodoCollection(MethodView):
     @todo.arguments(ListTaskParameters, location="query")
     @todo.response(status_code = 200, schema=ListTasks)
-    def get(self, parameters):
+    @inject_from_container(container)
+    def get(self, parameters, my_service: Injected[MyService]):
+        print(my_service.get_something())
+        print(free_function_with_injected())
         data = ListTasks().load({'tasks':tasks})
         pass
         return data
@@ -114,5 +147,24 @@ class TodoById(MethodView):
 api.register_blueprint(todo)
 
 
+# wireup.integration.flask.setup(container,app)
+
+@inject_from_container(container)
+def free_function_with_injection_mixed(regular_param, injected_param : Injected[MyService], factory_result: Injected[FactoryFunctionReturn]):
+    """
+    Function demonstration mixing with regular parameter and injected parameter
+    :param regular_param:
+            This is the regular parameter passed normally in main program
+    :param injected_param:
+            This parameter is injected (passed implicitly) by the DI container
+    :param factory_result:
+            Another parameter is injected by DI container but this demonstrates how to free function as service
+    :return: None
+    """
+    print(regular_param)
+    print(injected_param.get_something())
+    print(factory_result)
+
 if __name__ == '__main__':
-    server.run(host='0.0.0.0', port='8080', debug=True)
+    print(free_function_with_injection_mixed("This is regular parameter"))
+    app.run(host='0.0.0.0', port='8080', debug=True)
